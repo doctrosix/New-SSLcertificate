@@ -1,13 +1,27 @@
-# New-SSLCertificate v2.0
+# New-SSLCertificate v3.0
+# if you have a local Root CA, please place a PEM copy of the public root cert chain in the same folder as the script
+
 
 [CmdletBinding()]
 param(
     [string]$FQDN = '',
     [string]$Org = '',
-    [securestring]$NewPassword = ( Read-Host -Prompt "Enter password for private Key and PFX file" -AsSecureString ),
-    [string]$WorkFolderName = ''
+    <#
+        ExtraSANs is Optional. please submit extra FQDNs in quotes separated by commas.
+        Example:
+            -ExtraSANs "app.company.com", "db.company.com"
+    #>
+    [object[]]$ExtraSANs = @(),
+    [securestring]$NewPassword = ( # Optional. Will ask you for a password if no SecureString is provided
+        Read-Host -Prompt "Enter password for private Key and PFX file" -AsSecureString ),
+    [string]$WorkFolderName = '', # Optional. Will create a new folder based on timestamp
+    [switch]$LocalCACert # Optional. Uses Chain file you provided. please edit line 97 with your rootchain file name.
 )
 
+# copy your Enterprise CA cert chain to the script's home folder
+# edit filename below to match your rootchain PEM file.
+
+$caChainFile = Join-Path -Path $PSScriptRoot -ChildPath "chain_PEM_S2022-03.crt"
 
 ## FUNCTIONS
 
@@ -78,6 +92,10 @@ if ( $gitNotInstalled ) {
     Write-Output "Please install Git for Windows at https://git-scm.com/"
     Throw "Git not installed"
 }
+$noSslAlias = -not ( Test-Path -Path 'Alias:openssl' )
+if ( $noSslAlias ) {
+    Set-Alias -Name 'openssl' -Value $openSSL
+}
 
 $config = 'config.txt'
 $key = 'key.pem'
@@ -118,12 +136,30 @@ $pfxpass = Join-Path -Path $workFolder -ChildPath $pfxpass
 
 Set-Location -Path $workFolder
 
+if ($LocalCACert) {
+    Copy-Item -Path $caChainFile -Destination $chain
+}
+
+$basicSANs = @( 'DNS:$FQDN', 'DNS:www.$FQDN' )
+
+if ( $ExtraSANs.Length -gt 0 ) {
+    $formattedSANs = @(
+        foreach ( $san in $ExtraSANs ) {
+            'DNS:' + $san
+        }
+    )
+    [string]$altSANs = ( $basicSANs + $formattedSANs ) -join ', '
+}
+else {
+    [string]$altSANs = $basicSANs -join ', '
+}
+
 
 # Create config.txt
 $content = @(
     "FQDN = $fqdn"
     "ORGNAME = $org"
-    'ALTNAMES = DNS:$FQDN, DNS:www.$FQDN'
+    "ALTNAMES = $altSANs"
     ''
     "[ req ]"
     "default_bits = 2048"
@@ -175,25 +211,44 @@ Set-Content -Value ( Format-SecureString -SecString $NewPassword ) -Path $keypas
 
 
 # Go and get CSR signed by CA
-Write-Output "`r`n-Visit your SSL vendor website and submit the CSR."
+if ($LocalCACert) {
+    Write-Output "`r`n-Visit the Local CA and submit the CSR."
+}
+else {
+    Write-Output "`r`n-Visit your SSL vendor website and submit the CSR."
+}
+
 Write-Output "-Please download PEM, or Base64 format files"
 Write-Output "-Use the file saved as signrequest.csr or use the Text Below:`r`n"
 $csrdata = Get-Content -Path $csr      # outputs CSR text to screen.
 Write-Output $csrdata
 $csrdata | Set-Clipboard
 Write-Output "`r`nText Copied to Clipboard"
-Write-Output "`r`n-Copy the vendor's signed certificate file, and chain file to the work folder:"
+
+if ($LocalCACert) {
+    Write-Output "`r`n-Copy the signed certificate file from the Local CA to the work folder:"
+}
+else {
+    Write-Output "`r`n-Copy the vendor's signed certificate file, and chain file to the work folder:"
+}
+
 Write-Output ( '    ' + $workFolder )
 Write-Output "`r`n-Fill in the blanks below when you're ready`r`n"
 
 $certfile = Read-Host -Prompt "Enter cert file name"
-$chainfile = Read-Host -Prompt "Enter chain or bundle file name"
+
+if ( -not $LocalCACert ) {
+    $chainfile = Read-Host -Prompt "Enter chain or bundle file name"
+}
+
 
 if ( $certfile -cne 'cert.cer' ) {
     Copy-Item -Path ( '.\' + $certfile ) -Destination ( $cert )
 }
-if ( $chainfile -cne 'chain.cer' ) {
-    Copy-Item -Path ( '.\' + $chainfile ) -Destination ( $chain )
+if ( -not $LocalCACert ) {
+    if ( $chainfile -cne 'chain.cer' ) {
+        Copy-Item -Path ( '.\' + $chainfile ) -Destination ( $chain )
+    }
 }
 
 
@@ -209,9 +264,8 @@ $splat = @{
         "`"$cert`""
     )
 }
-[string]$chainTest = ( Invoke-Process @splat ).stdout
-[string]$stringwork = ($chainTest -split ':')[2]
-if ( -not($stringwork -match 'OK') ) {
+[string]$chainTest = ( Invoke-Process @splat ).stdout.Split(':')[2].Trim()
+if ( $chainTest -cne 'OK') {
     Throw "Cert does not link to chain."
 }
 else {
@@ -239,7 +293,8 @@ $splat = @{
         "-in `"$fullChain`""
     )
 }
-[string]$certModulus = ( Invoke-Process @splat ).stdout
+# caculates Hash and Modulus from raw Base64 data, while stripping away the "Modulus=" and "(stdin)= " text
+[string]$certHash = ( ( Invoke-Process @splat ).stdout.Split('=')[1] | openssl 'sha256' ).Split(' ')[1]
 
 $splat = @{
     Title        = 'OpenSSL'
@@ -251,9 +306,9 @@ $splat = @{
         "-in `"$keyplain`""
     )
 }
-[string]$keyModulus = ( Invoke-Process @splat ).stdout
+[string]$keyHash = ( ( Invoke-Process @splat ).stdout.Split('=')[1] | openssl 'sha256' ).Split(' ')[1]
 
-if ($certModulus -cne $keyModulus) {
+if ( $certHash -cne $keyHash ) {
     Throw "key does not match certificate"
 }
 else {
@@ -284,6 +339,8 @@ Remove-Variable -Name 'splat'
 # sort all output files in folders
 $importantFiles = @(
     $cert
+    $chain
+    $fullChain
     $key
     $keyplain
     $keypass
@@ -304,19 +361,22 @@ foreach ($file in $otherFiles) {
 # cleanup and success message
 Set-Location -Path $PSScriptRoot
 Write-Output ("`r`nAll files are packed and ready in folder:`r`n" + $workFolder + "`r`n")
-Write-Output @'
-The important files:
-cert.cer        Your Signed SSL Certificate
-key.pem         The Private Key, encrypted by password
-keypass.txt     Password for Private Key, in plain text.
-keyplain.pem    The Private Key, in plain text
-pack.pfx        The full PFX package containing the Cert, Key, and Certificate Chain
-pfxpass.txt     Password for PFX file, in plain text.
 
-The other files, which might be needed in a pinch:
-chain.cer       Certificate chain bundle with root CA and intermediate CAs
-config.txt      Config used to generate key and CSR with OpenSSL
-fullchain.cer   Full chain bundle WITH Signed certificate
-signrequest.csr The original CSR, or 'Certificate Signing Request' file
+$message = @(
+    'The important files:'
+    'cert.cer        Your Signed SSL Certificate'
+    'chain.cer       Certificate chain bundle with root CA and intermediate CAs'
+    'fullchain.cer   Full chain bundle WITH Signed certificate'
+    'key.pem         The Private Key, encrypted by password'
+    'keypass.txt     Password for Private Key, in plain text.'
+    'keyplain.pem    The Private Key, in plain text'
+    'pack.pfx        The full PFX package containing the Cert, Key, and Certificate Chain'
+    'pfxpass.txt     Password for PFX file, in plain text.'
+    ''
+    'The other files, which might be needed in a pinch:'
+    'config.txt      Config used to generate key and CSR with OpenSSL'
+    'signrequest.csr The original Certificate Signing Request file. (CSR)'
+    "$certfile, and other files recieved from your SSL provider"
+)
 
-'@
+Write-Output $message

@@ -1,79 +1,127 @@
-# New-SSLCertificate v3.0
+# New-SSLCertificate v20230620.01
+#
 # if you have a local Root CA, please place a PEM copy of the public root cert chain in the same folder as the script
-
+# Browse the 'Set Variables' section to modify values to match your company specs.
+# Once variables are set, Simple usage is below:
+#       .\New-SSLCertificate.ps1 -FQDN 'server.company.com'
+#
 
 [CmdletBinding()]
 param(
+    # Required IF no config file present.
     [string]$FQDN = '',
+    # Required IF no FQDN submitted. Will take an OpenSSL config file if you have one.
+    [string]$ConfigFile = 'C:\falsefolderName\9824357039487.txt',
+    # Optional. Organization Name (Company Name)
+    # set default name in 'Set Variables > Org Handling' below.
     [string]$Org = '',
-    <#
-        ExtraSANs is Optional. please submit extra FQDNs in quotes separated by commas.
-        Example:
-            -ExtraSANs "app.company.com", "db.company.com"
-    #>
-    [object[]]$ExtraSANs = @(),
-    [securestring]$NewPassword = ( # Optional. Will ask you for a password if no SecureString is provided
-        Read-Host -Prompt "Enter password for private Key and PFX file" -AsSecureString ),
-    [string]$WorkFolderName = '', # Optional. Will create a new folder based on timestamp
-    [switch]$LocalCACert # Optional. Uses Chain file you provided. please edit line 97 with your rootchain file name.
+    ####
+    # Optional. please submit extra FQDNs in quotes separated by commas.
+    # accepts arrays.
+    # Example:
+    #		-ExtraSANs "app.company.com", "db.company.com", "db"
+    # Defaults:
+    #       host.company.com.
+    #       www.host.company.com.
+    #       host. (only if Local CA)
+    ####
+    [string[]]$ExtraSANs = @(),
+    # Optional. Will ask you for a password if no SecureString is provided
+    [securestring]$NewPassword = (
+        Read-Host -Prompt "Enter password for private Key and PFX file" -AsSecureString
+    ),
+    # Optional. Will create a new folder based on timestamp
+    [string]$WorkFolderName = '',
+    # Optional. For use with Public CA like Digicert, Entrust, etc.
+    # if param is unused it defaults to Local-CA submission.
+    # Uses Chain file you provided. please edit $caChainFile with your rootchain file name.
+    [switch]$forPublicCAsigning,
+    # Optional. Packs an additional PFX with key and cert only. No chains included in PFX.
+    # (useful for copiers and printers)
+    [switch]$basicPFX
 )
 
-# copy your Enterprise CA cert chain to the script's home folder
-# edit filename below to match your rootchain PEM file.
-
-$caChainFile = Join-Path -Path $PSScriptRoot -ChildPath "chain_PEM_S2022-03.crt"
-
-## FUNCTIONS
-
-# Invoke-Process is similar to Start-Process, except it packs
-# console output into a nice hashtable for you.
-Function Invoke-Process {
-    [CmdletBinding()]
-    param(
-        [string]$Title,
-        [string]$FilePath,
-        [Object[]]$ArgumentList
-    )
-    Try {
-        [System.IO.FileInfo]$FilePath = Get-Item -Path $FilePath
-    }
-    Catch {
-        Throw "Invalid Path"
-    }
-
-    [string]$FilePath = $FilePath.FullName
-
-    Try {
-        $pinfo = New-Object System.Diagnostics.ProcessStartInfo
-        $pinfo.FileName = $FilePath
-        $pinfo.RedirectStandardError = $true
-        $pinfo.RedirectStandardOutput = $true
-        $pinfo.UseShellExecute = $false
-        $pinfo.Arguments = $ArgumentList
-
-        $p = New-Object -TypeName 'System.Diagnostics.Process'
-        $p.StartInfo = $pinfo
-        $p.Start() | Out-Null
-        $procOutput = $p.StandardOutput.ReadToEnd()
-        $procErr = $p.StandardError.ReadToEnd()
-        $p.WaitForExit()
-        $results = @{
-            title    = $Title
-            stdout   = $procOutput
-            stderr   = $procErr
-            exitCode = $p.ExitCode
-        }
-        return $results
-    }
-    Catch {
-        exit
-    }
+####
+#	Param error handling
+####
+$noFQDNparam = $FQDN -ceq ''
+$noConfigFileParam = $ConfigFile -ceq 'C:\falsefolderName\9824357039487.txt'
+if ($noFQDNparam -and $noConfigFileParam) {
+    throw "ERROR: Must provide full FQDN, or openSSL config file"
 }
 
-# Decrypts SecureStrings to feed OpenSSL.exe, and TXT files.
+#####################################################################################
+# Set Variables
+#####################################################################################
+#       Copy your Enterprise CA cert chain to the script's home folder, in PEM / Base64 format
+#       Edit $caChainFile below to match your rootchain PEM file.
+#####################################################################################
+$caChainFile = Join-Path -Path $PSScriptRoot -ChildPath "localCA-RootChain.crt"
+
+# Windows CA server: caserver.company.com\CAname
+$companyCAfqdn = 'ca01.company.com'
+$companyCAname = 'Company-CA01-CA'
+$companyCA = $companyCAfqdn + '\' + $companyCAname
+$certTemplate = 'Company-WebServer'
+
+$configFileExists = Test-Path -Path $ConfigFile
+
+# check if OpenSSL is installed locally
+$openSSL = "C:\Program Files\Git\usr\bin\openssl.exe"
+$gitNotInstalled = -not (Test-Path -Path $openSSL)
+if ( $gitNotInstalled ) {
+    "You need OpenSSL from Git installed on your machine"
+    "Please install Git for Windows at https://git-scm.com/"
+    Throw "Git not installed"
+}
+
+$config = 'config.txt'
+$key = 'key.pem'
+$keyplain = 'keyplain.pem'
+$keypass = 'keypass.txt'
+$csr = 'signrequest.csr'
+$cert = 'cert.crt'
+$chain = 'chain.crt'
+$fullchain = 'fullchain.crt'
+$pfx = 'pack.pfx'
+$basicPFXfile = 'basic.pfx'
+$pfxpass = 'pfxpass.txt'
+
+# Sets $LocalCACert flag
+if ($forPublicCAsigning) {
+    $LocalCACert = $false
+}
+else {
+    $LocalCACert = $true	
+}
+
+# FQDN handling
+if ($configFileExists) {
+    # Do Nothing, $FQDN ignored.
+}
+elseif ($FQDN -eq '') {
+    $FQDN = Read-Host -Prompt "Enter FQDN"
+}
+else {
+    # Do Nothing
+}
+
+# Org Handling
+if ($LocalCACert) {
+    $Org = 'Company Co.'
+}
+elseif ($Org -eq '') {
+    $Org = Read-Host -Prompt "Enter Company Name"
+}
+
+#####################################################################################
+## FUNCTIONS
+#####################################################################################
+# Decrypts SecureStrings to Strings for feeding OpenSSL.exe, and TXT files.
 function Format-SecureString {
     [CmdletBinding()]
     param(
+        [Parameter(Mandatory = $true)]
         [securestring]$SecString
     )
 
@@ -84,45 +132,150 @@ function Format-SecureString {
     return $plaintext
 }
 
+# Generates OpenSSL config file
+function New-ConfigContent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string]$FQDN,
+        [Parameter(Mandatory = $false)] [string[]]$ExtraSANs = @(),
+        [Parameter(Mandatory = $true)] [string]$Org,
+        [Parameter(Mandatory = $false)] [bool]$PublicCA = $false
+    )
+	
+    $domainsplit = $FQDN.Split('.')
+    $netBIOShostname = $domainsplit[0]
+    $domainlevels = $domainsplit.Length
+    [string[]]$basicSANs = @(
+        'DNS:$FQDN'
+        if ( $FQDN -match '/*' ) {
+            # wildcard certs
+            # if FQDN is '*.company.com', this outputs 'DNS:company.com'
+            (
+                'DNS:' + (
+                    @($domainsplit[1..($domainlevels - 1)]) -Join '.'
+                )
+            )
+        }
+        else {
+            # Non-wildcard certs
+            # Adds basic SANs for deployment flexibility
+            #       IF $FQDN equals 'server.company.com'
+            #       THEN it adds:
+            #           www.server.company.com.
+            #           server.
+            # The single-word netbios name is disabled for Public CA submission
+            'DNS:www.$FQDN'
+            if (-not $PublicCA) {
+                ('DNS:' + $netBIOShostname)
+            }
+        }
+    )
 
-# Set Variables
-$openSSL = "C:\Program Files\Git\usr\bin\openssl.exe"
-$gitNotInstalled = -not (Test-Path -Path $openSSL)
-if ( $gitNotInstalled ) {
-    Write-Output "Please install Git for Windows at https://git-scm.com/"
-    Throw "Git not installed"
+    # Assemble Subject Alternative Name string
+    if ( $ExtraSANs.Length -gt 0 ) {
+        [string[]]$formattedSANs = @(
+            foreach ( $san in $ExtraSANs ) {
+                'DNS:' + $san
+            }
+        )
+        [string]$altSANs = ( $basicSANs + $formattedSANs ) -join ', '
+    }
+    else {
+        [string]$altSANs = $basicSANs -join ', '
+    }
+
+    # Create config.txt content
+    # req_distinguished_name should be ordered big to small
+    # Example: Country, State, Locality (City), Org, OU, Common Name (FQDN)
+    # C, S, L, O, OU, CN
+    #
+    $configContent = @(
+		('FQDN = ' + $fqdn)
+		('ORGNAME = ' + $Org)
+		('ALTNAMES = ' + $altSANs)
+        ''
+        "[ req ]"
+        "default_bits = 2048"
+        "default_md = sha256"
+        "prompt = no"
+        "encrypt_key = no"
+        "distinguished_name = req_distinguished_name"
+        "req_extensions = req_ext"
+        ''
+        "[ req_distinguished_name ]"
+        "C = US"
+        'O = $ORGNAME'
+        'CN = $FQDN'
+        ''
+        "[ req_ext ]"
+        'subjectAltName = $ALTNAMES'
+    )
+    return $configContent
 }
-$noSslAlias = -not ( Test-Path -Path 'Alias:openssl' )
-if ( $noSslAlias ) {
-    Set-Alias -Name 'openssl' -Value $openSSL
+
+# Hashes the Modulus Strings
+function Start-ModulusHash {
+    [CmdletBinding()]
+    param(
+        [string]$String
+    )
+	
+    $stringAsStream = [System.IO.MemoryStream]::new()
+    $writer = [System.IO.StreamWriter]::new($stringAsStream)
+    $writer.Write($String)
+    $writer.Flush()
+    $stringAsStream.Position = 0
+    $hash = (Get-FileHash -InputStream $stringAsStream -Algorithm SHA256).Hash
+    return $hash
 }
 
-$config = 'config.txt'
-$key = 'key.pem'
-$keyplain = 'keyplain.pem'
-$keypass = 'keypass.txt'
-$csr = 'signrequest.csr'
-$cert = 'cert.cer'
-$chain = 'chain.cer'
-$fullchain = 'fullchain.cer'
-$pfx = 'pack.pfx'
-$pfxpass = 'pfxpass.txt'
+# Submits CSR to Windows CA server using certreq
+# User must be permitted to enroll certificates within template permissions
+function Send-CSRtoCompanyCA {
+    [CmdletBinding()]
+    param(
+        [string]$WindowsCA,
+        [string]$CSRfilePath,
+        [string]$CertFilePath,
+        [string]$Template
+    )
 
-Write-Output "`r`n"
-if ($fqdn -eq '') {
-    $fqdn = Read-Host -Prompt "Enter FQDN"
+    # Submit CSR to CA. Then save cert File and CA response.
+    $attrib = 'CertificateTemplate:' + $Template
+    $certReqOutput = & 'C:\Windows\system32\certreq.exe' '-submit' '-attrib' "`"$attrib`"" '-config' "`"$WindowsCA`"" "`"$CSRfilePath`"" "`"$CertFilePath`""
+    $certIssued = $certReqOutput[2] -eq 'Certificate retrieved(Issued) Issued'
+    if ($certIssued) {
+        # do nothing
+    }
+    else {
+        $certReqOutput
+        Throw "ERROR: Certificate not issued"
+    }
+    # Process CA response file into readable Text.
+    $certFileObj = Get-Item -Path $CertFilePath
+    $certFolderPath = $certFileObj.DirectoryName
+    $responseFilePath = Join-Path -Path $certFolderPath -ChildPath ($certFileObj.BaseName + '.rsp')
+    $responseTXTfilePath = Join-Path -Path $certFolderPath -ChildPath '.\CAresponse.txt'
+    & 'C:\Windows\System32\certutil.exe' "`"$responseFilePath`"" > $responseTXTfilePath
+    Remove-Item -Path $responseFilePath
+    return $true
 }
-if ($org -eq '') {
-    $org = Read-Host -Prompt "Enter Company Name"
-}
 
-
+#####################################################################################
+# MAIN
+#####################################################################################
+''
+####
 # Create and enter Workfolder
+####
+
+# Create Workfolder
 if ( $workFolderName -eq '' ) {
-    [string]$workFolderName = Get-Date -Format FileDateTimeUniversal
+    [string]$workFolderName = (Get-Date -Format FileDateTime).Substring(0, 15)
 }
 [string]$workFolder = ( New-Item -Path $workFolderName -ItemType Directory ).FullName
 
+# prepare Path strings for each workfile.
 $config = Join-Path -Path $workFolder -ChildPath $config
 $key = Join-Path -Path $workFolder -ChildPath $key
 $keyplain = Join-Path -Path $workFolder -ChildPath $keyplain
@@ -133,6 +286,16 @@ $chain = Join-Path -Path $workFolder -ChildPath $chain
 $fullchain = Join-Path -Path $workFolder -ChildPath $fullchain
 $pfx = Join-Path -Path $workFolder -ChildPath $pfx
 $pfxpass = Join-Path -Path $workFolder -ChildPath $pfxpass
+$basicPFXpath = Join-Path -Path $workFolder -ChildPath $basicPFXfile
+
+$workFolderReady = Test-Path -Path $workFolder
+$tryCount = 0
+while ( -not $workFolderReady ) {
+    Start-sleep -Seconds 5
+    $workFolderReady = Test-Path -Path $workFolder
+    $tryCount ++
+    if ($tryCount -ge 12) { Throw 'Workfolder cannot be created' }
+}
 
 Set-Location -Path $workFolder
 
@@ -140,201 +303,221 @@ if ($LocalCACert) {
     Copy-Item -Path $caChainFile -Destination $chain
 }
 
-$basicSANs = @( 'DNS:$FQDN', 'DNS:www.$FQDN' )
-
-if ( $ExtraSANs.Length -gt 0 ) {
-    $formattedSANs = @(
-        foreach ( $san in $ExtraSANs ) {
-            'DNS:' + $san
-        }
-    )
-    [string]$altSANs = ( $basicSANs + $formattedSANs ) -join ', '
+# If no $ConfigFile is supplied, generate basic config file.
+if ($configFileExists) {
+    $content = Get-Content -Path $ConfigFile
+    Set-Content -Value $content -Path $config
 }
 else {
-    [string]$altSANs = $basicSANs -join ', '
+    if ($forPublicCAsigning) {
+        $content = New-ConfigContent -FQDN $FQDN -ExtraSANs $ExtraSANs -Org $Org -PublicCA $forPublicCAsigning
+    }
+    else {
+        $content = New-ConfigContent -FQDN $FQDN -ExtraSANs $ExtraSANs -Org $Org
+    }
+    Set-Content -Value $content -Path $config
 }
 
-
-# Create config.txt
-$content = @(
-    "FQDN = $fqdn"
-    "ORGNAME = $org"
-    "ALTNAMES = $altSANs"
-    ''
-    "[ req ]"
-    "default_bits = 2048"
-    "default_md = sha256"
-    "prompt = no"
-    "encrypt_key = no"
-    "distinguished_name = req_distinguished_name"
-    "req_extensions = req_ext"
-    "[ req_distinguished_name ]"
-    "C = US"
-    'O = $ORGNAME'
-    'CN = $FQDN'
-    "[ req_ext ]"
-    'subjectAltName = $ALTNAMES'
+# Create plaintext private Key and CSR files
+'*** Creating keypair and CSR...'
+$openSSLargs = @(
+    'req',
+    '-new',
+    '-config', "`"$config`"",
+    '-keyout', "`"$keyplain`"",
+    '-out', "`"$csr`""
 )
-Set-Content -Value $content -Path $config
+& $openSSL $openSSLargs
+Remove-Variable -Name 'openSSLargs'
+'DONE'
+''
 
+# Create a password-protected private key file for systems that need it
+'*** Encrypting private key'
+$openSSLargs = @(
+    'rsa',
+    '-des',
+    '-in', "`"$keyplain`"",
+    '-passout', (
+        'pass:' + (
+            Format-SecureString -SecString $NewPassword
+        )
+    ),
+    '-out', "`"$key`""
+)
+& $openSSL $openSSLargs
+Remove-Variable -Name 'openSSLargs'
+'DONE'
+''
 
-# Create Private Key and CSR files
-$splat = @{
-    Title        = 'OpenSSL'
-    FilePath     = $openSSL
-    ArgumentList = @(
-        'req'
-        '-new'
-        "-config `"$config`""
-        "-keyout `"$keyplain`""
-        "-out `"$csr`""
-    )
-}
-Invoke-Process @splat | Out-Null
-
-
-# Create a password-protected private key file
-$splat = @{
-    Title        = 'OpenSSL'
-    FilePath     = $openSSL
-    ArgumentList = @(
-        "rsa"
-        "-des"
-        "-in `"$keyplain`""
-        ("-passout pass:" + ( Format-SecureString -SecString $NewPassword ) )
-        "-out `"$key`""
-    )
-}
-Invoke-Process @splat | Out-Null
-Remove-Variable -Name 'splat'
+# Create txt file containing password
 Set-Content -Value ( Format-SecureString -SecString $NewPassword ) -Path $keypass
 
-
-# Go and get CSR signed by CA
+####
+# Submit CSR and get signed cert.
+####
 if ($LocalCACert) {
-    Write-Output "`r`n-Visit the Local CA and submit the CSR."
+    #"-Visit the Local CA at https://pki.peerlessbev.com/certsrv and submit the CSR."
+    '*** Submitting CSR to ' + $companyCA + '...'
 }
 else {
-    Write-Output "`r`n-Visit your SSL vendor website and submit the CSR."
-}
+    "-Visit your SSL vendor website and submit the CSR."
+    "-Please download PEM, or Base64 format files from the signing CA"
+    "-Use the file saved as signrequest.csr or use the Text Below:"
+    ''
 
-Write-Output "-Please download PEM, or Base64 format files"
-Write-Output "-Use the file saved as signrequest.csr or use the Text Below:`r`n"
-$csrdata = Get-Content -Path $csr      # outputs CSR text to screen.
-Write-Output $csrdata
-$csrdata | Set-Clipboard
-Write-Output "`r`nText Copied to Clipboard"
+    # outputs CSR text to screen.
+    $csrdata = Get-Content -Path $csr
+    $csrdata
+    ''
+    $csrdata | Set-Clipboard
+    "Text Copied to Clipboard"
+    ''
+}
 
 if ($LocalCACert) {
-    Write-Output "`r`n-Copy the signed certificate file from the Local CA to the work folder:"
+    # Do Nothing
 }
 else {
-    Write-Output "`r`n-Copy the vendor's signed certificate file, and chain file to the work folder:"
+    "-Copy the vendor's signed certificate file, and chain file to the work folder:"
+    ( '    ' + $workFolder )
+    ''
 }
 
-Write-Output ( '    ' + $workFolder )
-Write-Output "`r`n-Fill in the blanks below when you're ready`r`n"
+[bool]$localCAcertHasBeenIssued = $false
+if ($LocalCACert) {
+    $parameters = @{
+        WindowsCA = $companyCA
+        CSRfilePath = $csr
+        CertFilePath = $cert
+        Template = $certTemplate
+    }
+    $localCAcertHasBeenIssued = Send-CSRtoCompanyCA @parameters
+    $SignedCertFile = 'cert.crt'
+}
+else {
+    ''
+    "-Fill in the blanks below when you're ready"
+    ''
+    $SignedCertFile = Read-Host -Prompt "Enter cert file name"
+    ''
+}
 
-$certfile = Read-Host -Prompt "Enter cert file name"
+if ($localCAcertHasBeenIssued) {
+    "SUCCESS: Certificate Issued"
+    ''
+}
 
 if ( -not $LocalCACert ) {
     $chainfile = Read-Host -Prompt "Enter chain or bundle file name"
 }
 
-
-if ( $certfile -cne 'cert.cer' ) {
-    Copy-Item -Path ( '.\' + $certfile ) -Destination ( $cert )
+if ( $SignedCertFile -cne 'cert.crt' ) {
+    Copy-Item -Path ( '.\' + $SignedCertFile ) -Destination ( $cert )
 }
 if ( -not $LocalCACert ) {
-    if ( $chainfile -cne 'chain.cer' ) {
+    if ( $chainfile -cne 'chain.crt' ) {
         Copy-Item -Path ( '.\' + $chainfile ) -Destination ( $chain )
     }
 }
 
 
 #Check Cert Chain
-Write-Output "`r`nTesting certificate chain..."
-$splat = @{
-    Title        = 'OpenSSL'
-    FilePath     = $openSSL
-    ArgumentList = @(
-        'verify'
-        '-x509_strict'
-        "-CAfile `"$chain`""
-        "`"$cert`""
-    )
-}
-[string]$chainTest = ( Invoke-Process @splat ).stdout.Split(':')[2].Trim()
-if ( $chainTest -cne 'OK') {
-    Throw "Cert does not link to chain."
+"*** Testing certificate against CA chain..."
+$openSSLargs = @(
+    'verify',
+    '-x509_strict',
+    '-CAfile', "`"$chain`"",
+    "`"$cert`""
+)
+[string]$chainTestOutput = (& $openSSL $openSSLargs).Trim()
+$chainTestOutput
+[string]$chainTest = $chainTestOutput.Substring($chainTestOutput.Length - 2)
+if ( $chainTest -ceq 'OK') {
+    "PASSED: Certificate chain is valid"
+    ''
 }
 else {
-    Write-Output "PASSED: Certificate chain is valid"
+    Set-Location -Path '..'
+    Throw "FAILED: Cert does not link to chain."
 }
 
-
-# Assemble Full Certificate chain file, fullchain.cer
+# Assemble Full Certificate chain file, fullchain.crt
 $fullChainData = Get-Content -Path @(
     $cert
     $chain
 )
 $fullChainData | Set-Content -Path $fullchain
 
+####
+#	Check Key against Fullchain Cert
+####
+"*** Testing private key against full certificate chain..."
 
-#Check Key against Fullchain Cert
-Write-Output "Testing private key against full certificate chain..."
-$splat = @{
-    Title        = 'OpenSSL'
-    FilePath     = $openSSL
-    ArgumentList = @(
-        'x509'
-        '-noout'
-        '-modulus'
-        "-in `"$fullChain`""
-    )
-}
-# caculates Hash and Modulus from raw Base64 data, while stripping away the "Modulus=" and "(stdin)= " text
-[string]$certHash = ( ( Invoke-Process @splat ).stdout.Split('=')[1] | openssl 'sha256' ).Split(' ')[1]
+# Getting modulus from fullchain
+$openSSLargs = @(
+    'x509',
+    '-noout',
+    '-modulus',
+    '-in', "`"$fullChain`""
+)
+[string]$openSSLOutput = & $openSSL $openSSLargs
+[string]$certModulus = $openSSLOutput.Trim().Split('=')[1]
+$certHash = Start-ModulusHash -String $certModulus
+('Hash of cert modulus: ' + $certHash)
 
-$splat = @{
-    Title        = 'OpenSSL'
-    FilePath     = $openSSL
-    ArgumentList = @(
-        'rsa'
-        '-noout'
-        '-modulus'
-        "-in `"$keyplain`""
-    )
-}
-[string]$keyHash = ( ( Invoke-Process @splat ).stdout.Split('=')[1] | openssl 'sha256' ).Split(' ')[1]
+# Getting modulus from private key
+$openSSLargs = @(
+    'rsa',
+    '-noout',
+    '-modulus',
+    '-in', "`"$keyplain`""
+)
+[string]$openSSLOutput = & $openSSL $openSSLargs
+[string]$keyModulus = $openSSLOutput.Trim().Split('=')[1]
+$keyHash = Start-ModulusHash -String $keyModulus
+('Hash of key modulus:  ' + $keyHash)
 
-if ( $certHash -cne $keyHash ) {
-    Throw "key does not match certificate"
+if ( $certHash -ceq $keyHash ) {
+    "PASSED: Key matches certificate and chain"
+    ''
+    ''
 }
 else {
-    Write-Output "PASSED: Key matches certificate and chain"
+    Set-Location -Path '..'
+    Throw "key does not match certificate"
 }
 
+####
+# packing the the PFX file(s)
+####
+# Packs key, cert, and CA chain.
+$openSSLargs = @(
+    'pkcs12',
+    "-export",
+    '-inkey', "`"$keyplain`"",
+    "-in", "`"$cert`"",
+    "-certfile", "`"$chain`"",
+    "-out", "`"$pfx`"",
+    "-passout", ( "pass:" + (Format-SecureString -SecString $NewPassword) )
+)
+& $openSSL $openSSLargs
 
-#pack the PFX file
-$splat = @{
-    Title        = 'OpenSSL'
-    FilePath     = $openSSL
-    ArgumentList = @(
-        'pkcs12'
-        "-export"
-        "-inkey `"$keyplain`""
-        "-in `"$cert`""
-        "-certfile `"$chain`""
-        "-out `"$pfx`""
-        ( "-passout pass:" + ( Format-SecureString -SecString $NewPassword ) )
+if ($basicPFX) {
+    # Packs key and cert only. (useful for copiers and printers)
+    $openSSLargs = @(
+        'pkcs12',
+        "-export",
+        '-inkey', "`"$keyplain`"",
+        "-in", "`"$cert`"",
+        "-out", "`"$basicPFXpath`"",
+        "-passout", ( "pass:" + (Format-SecureString -SecString $NewPassword) )
     )
+    & $openSSL $openSSLargs
 }
-Invoke-Process @splat | Out-Null
-Remove-Variable -Name 'splat'
 
+Remove-Variable -Name 'openSSLargs'
 ( Format-SecureString -SecString $NewPassword ) | Set-Content -Path $pfxpass
-
 
 # sort all output files in folders
 $importantFiles = @(
@@ -346,37 +529,46 @@ $importantFiles = @(
     $keypass
     $pfx
     $pfxpass
+    if ($basicPFX) {
+        $basicPFXpath
+    }
 )
-New-Item -Path '.\Important' -ItemType Directory
+New-Item -Path '.\Important' -ItemType Directory | Out-Null
 foreach ($file in $importantFiles) {
     Move-Item -Path $file -Destination '.\Important'
 }
 
 $otherFiles = @( Get-ChildItem -Path '.' -File )
-New-Item -Path '.\Other' -ItemType Directory
+New-Item -Path '.\Other' -ItemType Directory | Out-Null
 foreach ($file in $otherFiles) {
     Move-Item -Path $file -Destination '.\Other'
 }
 
 # cleanup and success message
 Set-Location -Path $PSScriptRoot
-Write-Output ("`r`nAll files are packed and ready in folder:`r`n" + $workFolder + "`r`n")
+"All files are packed and ready in folder:"
+'    ' + $workFolder
+''
 
 $message = @(
     'The important files:'
     'cert.cer        Your Signed SSL Certificate'
-    'chain.cer       Certificate chain bundle with root CA and intermediate CAs'
+    'chain.cer       Certificate chain bundle containing root CA and intermediate CAs'
     'fullchain.cer   Full chain bundle WITH Signed certificate'
     'key.pem         The Private Key, encrypted by password'
     'keypass.txt     Password for Private Key, in plain text.'
     'keyplain.pem    The Private Key, in plain text'
-    'pack.pfx        The full PFX package containing the Cert, Key, and Certificate Chain'
+    'pack.pfx        The full PFX package containing the cert, key, and certificate chain bundle'
+    if ($basicPFX) {
+        'basic.pfx       A basic PFX package with just the Key, and Cert.'
+    }
     'pfxpass.txt     Password for PFX file, in plain text.'
     ''
     'The other files, which might be needed in a pinch:'
     'config.txt      Config used to generate key and CSR with OpenSSL'
     'signrequest.csr The original Certificate Signing Request file. (CSR)'
-    "$certfile, and other files recieved from your SSL provider"
+    'Any other files recieved from your Cert Authority'
+    ''
 )
-
-Write-Output $message
+$message
+explorer.exe "`"$workFolder`""

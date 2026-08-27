@@ -12,9 +12,12 @@ PEM, DER, and PFX
 Browse the 'Variables' section, near line 1192, to modify
 values to match your company specs.
 Once variables are set, Simple usage is below:
-```.\New-SSLCertificate.ps1 -FQDN 'server.company.com'
 ```
-```.\New-SSLCertificate.ps1 -ConfigFile 'C:\path\to\config.txt'
+.\New-SSLCertificate.ps1 -FQDN 'server.company.com'
+```
+
+```
+.\New-SSLCertificate.ps1 -ConfigFile 'C:\path\to\config.txt'
 ```
 
 openssl.exe for windows can be obtained from 'Git for Windows' or Chocolatey package manager

@@ -21,9 +21,9 @@ Once variables are set, Simple usage is below:
 ```
 
 openssl.exe for windows can be obtained from:
-Git for Windows
+Git for Windows  
 https://git-scm.com
 
-Chocolatey package manager
+Chocolatey package manager  
 https://community.chocolatey.org
 

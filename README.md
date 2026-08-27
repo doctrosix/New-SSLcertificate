@@ -20,7 +20,7 @@ Once variables are set, Simple usage is below:
 .\New-SSLCertificate.ps1 -ConfigFile 'C:\path\to\config.txt'
 ```
 
-openssl.exe for windows can be obtained from:
+openssl.exe for windows can be obtained from:  
 Git for Windows  
 https://git-scm.com
 
